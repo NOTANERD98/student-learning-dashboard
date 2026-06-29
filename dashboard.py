@@ -57,6 +57,16 @@ st.markdown("""
                    border-left: 4px solid #3498db; margin: 5px 0; }
     .success-box { background: #d5f5e3; border-radius: 8px; padding: 10px; }
     .warning-box { background: #fadbd8; border-radius: 8px; padding: 10px; }
+
+    /* ── RTL slider fix ──────────────────────────────────────────────────
+       The page-wide RTL direction flips Streamlit's slider: the track fill,
+       the handle's drag direction, and the min/max numbers all read reversed
+       and feel misaligned. Force the slider CONTROL to LTR so it behaves
+       conventionally (min on the left, max on the right, drag follows the
+       cursor), while keeping the Hebrew label right-aligned RTL. */
+    [data-testid="stSlider"] { direction: ltr; }
+    [data-testid="stSlider"] [data-testid="stWidgetLabel"],
+    [data-testid="stSlider"] label { direction: rtl; text-align: right; }
 </style>
 """, unsafe_allow_html=True)
 
