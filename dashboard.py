@@ -19,12 +19,17 @@ warnings.filterwarnings('ignore')
 # packages.txt). Harmless elsewhere — matplotlib silently skips missing fonts.
 plt.rcParams['font.family'] = ['DejaVu Sans', 'Noto Sans Hebrew', 'Arial Unicode MS', 'Arial']
 plt.rcParams['axes.unicode_minus'] = False
+# Silence matplotlib's per-glyph "findfont: Font family ... not found" log spam
+# (harmless fallbacks, but otherwise floods the Streamlit Cloud logs on first render).
+import logging
+logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import (accuracy_score, precision_score, recall_score,
-                              f1_score, confusion_matrix, roc_auc_score, roc_curve)
+                              f1_score, confusion_matrix, roc_auc_score, roc_curve,
+                              silhouette_score)
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.neighbors import KNeighborsClassifier
@@ -146,6 +151,164 @@ def train_models(df):
 df = load_or_generate_data()
 results, Xte_sc, y_te, FEAT, sc, imp = train_models(df)
 
+# ─── Cached figure builders & heavy computations ──────────────────────────────
+# Each chart is built once per unique input and reused on later reruns, so moving a
+# widget or switching pages never redraws an unchanged figure. Underscore-prefixed
+# params (e.g. _df) tell Streamlit to skip hashing that argument for the cache key.
+
+@st.cache_resource(show_spinner=False)
+def fig_overview(_df):
+    fig, axes = plt.subplots(1, 2, figsize=(9, 4))
+    _df['success'].value_counts().plot(kind='pie', ax=axes[0],
+        labels=['הצלחה', 'כישלון'], colors=['#2ecc71','#e74c3c'],
+        autopct='%1.1f%%', startangle=90, textprops={'fontsize': 11})
+    axes[0].set_title('התפלגות הצלחה/כישלון', fontweight='bold')
+    axes[0].set_ylabel('')
+    _df['final_grade'].hist(bins=30, ax=axes[1], color='#3498db',
+                            edgecolor='white', alpha=0.85)
+    axes[1].axvline(70, color='red', linestyle='--', linewidth=2, label='Cutoff=70')
+    axes[1].set_title('התפלגות ציון סופי', fontweight='bold')
+    axes[1].set_xlabel('ציון'); axes[1].legend()
+    fig.tight_layout()
+    return fig
+
+@st.cache_resource(show_spinner=False)
+def fig_eda_hist(_df, feat_sel):
+    fig, ax = plt.subplots(figsize=(8, 4))
+    data = _df[feat_sel].dropna()
+    ax.hist(data, bins=35, color='#3498db', edgecolor='white', alpha=0.85)
+    ax.axvline(data.mean(), color='red', linestyle='--', linewidth=2,
+               label=f'Mean={data.mean():.1f}')
+    ax.axvline(data.median(), color='orange', linestyle=':', linewidth=2,
+               label=f'Median={data.median():.1f}')
+    ax.set_title(f'התפלגות: {feat_sel}', fontweight='bold')
+    ax.legend()
+    return fig
+
+@st.cache_resource(show_spinner=False)
+def fig_eda_corr_heatmap(_df):
+    fig, ax = plt.subplots(figsize=(10, 8))
+    corr = _df.drop('student_id', axis=1).corr()
+    mask = np.triu(np.ones_like(corr, dtype=bool))
+    sns.heatmap(corr, annot=True, fmt='.2f', cmap='RdYlGn',
+                mask=mask, vmin=-1, vmax=1, center=0,
+                square=True, linewidths=0.5, ax=ax, annot_kws={'size': 9})
+    ax.set_title('מטריצת קורלציות', fontsize=14, fontweight='bold')
+    return fig
+
+@st.cache_resource(show_spinner=False)
+def fig_eda_corr_success(_df):
+    corr_s = _df.drop(['student_id','success'], axis=1).corrwith(_df['success']).sort_values(ascending=False)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    colors = ['#2ecc71' if x > 0 else '#e74c3c' for x in corr_s]
+    ax.barh(corr_s.index, corr_s.values, color=colors, edgecolor='white', alpha=0.9)
+    ax.axvline(0, color='black', linewidth=0.8)
+    ax.set_title('Correlation with Success', fontweight='bold')
+    return fig
+
+@st.cache_resource(show_spinner=False)
+def fig_eda_boxplots(_df):
+    fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+    for i, feat in enumerate(FEAT):
+        ax = axes[i // 4][i % 4]
+        df_c = _df[['success', feat]].dropna()
+        ax.boxplot([df_c[df_c['success']==0][feat],
+                    df_c[df_c['success']==1][feat]],
+                   labels=['כישלון', 'הצלחה'],
+                   patch_artist=True,
+                   boxprops=dict(alpha=0.7),
+                   medianprops=dict(color='black', linewidth=2))
+        boxes = ax.findobj(plt.matplotlib.patches.PathPatch)
+        if len(boxes) >= 2:
+            boxes[0].set_facecolor('#e74c3c')
+            boxes[1].set_facecolor('#2ecc71')
+        ax.set_title(feat.replace('_',' ').title(), fontsize=8, fontweight='bold')
+    fig.suptitle('Boxplots: כישלון (אדום) vs הצלחה (ירוק)', fontsize=12, fontweight='bold')
+    fig.tight_layout()
+    return fig
+
+@st.cache_resource(show_spinner=False)
+def fig_model_cm(model_name):
+    r = results[model_name]
+    fig, ax = plt.subplots(figsize=(5, 4))
+    sns.heatmap(r['cm'], annot=True, fmt='d', cmap='Blues', ax=ax,
+                xticklabels=['כישלון','הצלחה'], yticklabels=['כישלון','הצלחה'],
+                cbar=False, annot_kws={'size': 16})
+    ax.set_xlabel('חיזוי'); ax.set_ylabel('אמיתי')
+    ax.set_title(model_name, fontweight='bold')
+    return fig
+
+@st.cache_resource(show_spinner=False)
+def fig_model_roc(model_name):
+    r = results[model_name]
+    fig, ax = plt.subplots(figsize=(5, 4))
+    fpr, tpr, _ = roc_curve(r['y_test'], r['y_proba'])
+    ax.plot(fpr, tpr, color='#3498db', linewidth=2.5, label=f"AUC = {r['AUC']:.3f}")
+    ax.plot([0,1],[0,1], 'k--', linewidth=1)
+    ax.set_xlabel('False Positive Rate'); ax.set_ylabel('True Positive Rate')
+    ax.set_title('ROC Curve', fontweight='bold')
+    ax.legend(); ax.grid(alpha=0.3)
+    return fig
+
+@st.cache_resource(show_spinner=False)
+def fig_model_fi(model_name):
+    r = results[model_name]
+    fi = pd.Series(r['model'].feature_importances_, index=FEAT).sort_values(ascending=True)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    fi.plot(kind='barh', color='#3498db', edgecolor='white', ax=ax)
+    ax.set_title(f'Feature Importance – {model_name}', fontweight='bold')
+    return fig
+
+@st.cache_resource(show_spinner=False)
+def run_clustering(_df):
+    feats = ['number_of_logins','avg_session_time','assignments_submitted',
+             'late_submissions','quiz_avg','forum_posts',
+             'video_completion_rate','previous_grade']
+    X = _df[feats].copy()
+    imp2 = SimpleImputer(strategy='median')
+    X_imp = imp2.fit_transform(X)
+    sc2 = StandardScaler()
+    X_sc = sc2.fit_transform(X_imp)
+    pca = PCA(n_components=2, random_state=42)
+    X_pca = pca.fit_transform(X_sc)
+    return X_sc, X_pca, pca, feats
+
+@st.cache_resource(show_spinner=False)
+def cluster_fit(_X_sc, k):
+    km = KMeans(n_clusters=k, random_state=42, n_init=10)
+    labels = km.fit_predict(_X_sc)
+    sil = silhouette_score(_X_sc, labels)
+    return km, labels, sil
+
+@st.cache_resource(show_spinner=False)
+def fig_cluster_scatter(k):
+    X_sc, X_pca, pca, _ = run_clustering(df)
+    km, labels, _sil = cluster_fit(X_sc, k)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    scatter = ax.scatter(X_pca[:,0], X_pca[:,1], c=labels, cmap='tab10', alpha=0.6, s=15)
+    centers_pca = pca.transform(km.cluster_centers_)
+    ax.scatter(centers_pca[:,0], centers_pca[:,1],
+               c='black', marker='X', s=200, zorder=5, label='Centroids')
+    ax.set_title(f'K-Means (K={k}) – מרחב PCA', fontweight='bold')
+    ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
+    ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
+    ax.legend()
+    fig.colorbar(scatter, ax=ax)
+    return fig
+
+@st.cache_resource(show_spinner=False)
+def fig_fairness(_fair_df):
+    fig, ax = plt.subplots(figsize=(9, 5))
+    x = np.arange(len(_fair_df))
+    w = 0.2
+    for i, mname in enumerate(['Accuracy','Precision','Recall','F1']):
+        ax.bar(x + i*w, _fair_df[mname], w, label=mname, alpha=0.85, edgecolor='white')
+    ax.set_xticks(x + 1.5*w); ax.set_xticklabels(_fair_df['קבוצה'])
+    ax.set_ylim(0, 1.1); ax.set_ylabel('Score')
+    ax.set_title('ביצועי Random Forest לפי קבוצה', fontweight='bold')
+    ax.legend(); ax.grid(axis='y', alpha=0.3)
+    return fig
+
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 st.sidebar.title("🎓 ניווט")
 page = st.sidebar.radio("בחר מסך:", [
@@ -193,21 +356,7 @@ if page == "🏠 סקירה כללית":
         """)
 
     with col2:
-        fig, axes = plt.subplots(1, 2, figsize=(9, 4))
-        df['success'].value_counts().plot(kind='pie', ax=axes[0],
-            labels=['הצלחה', 'כישלון'], colors=['#2ecc71','#e74c3c'],
-            autopct='%1.1f%%', startangle=90, textprops={'fontsize': 11})
-        axes[0].set_title('התפלגות הצלחה/כישלון', fontweight='bold')
-        axes[0].set_ylabel('')
-
-        df['final_grade'].hist(bins=30, ax=axes[1], color='#3498db',
-                               edgecolor='white', alpha=0.85)
-        axes[1].axvline(70, color='red', linestyle='--', linewidth=2, label='Cutoff=70')
-        axes[1].set_title('התפלגות ציון סופי', fontweight='bold')
-        axes[1].set_xlabel('ציון'); axes[1].legend()
-        plt.tight_layout()
-        st.pyplot(fig)
-        plt.close()
+        st.pyplot(fig_overview(df))
 
     st.markdown("---")
     st.subheader("📋 תיאור המשתנים")
@@ -239,16 +388,7 @@ elif page == "📊 ניתוח נתונים (EDA)":
         feat_sel = st.selectbox("בחר משתנה", FEAT + ['final_grade'])
         col1, col2 = st.columns([2, 1])
         with col1:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            data = df[feat_sel].dropna()
-            ax.hist(data, bins=35, color='#3498db', edgecolor='white', alpha=0.85)
-            ax.axvline(data.mean(), color='red', linestyle='--', linewidth=2,
-                       label=f'Mean={data.mean():.1f}')
-            ax.axvline(data.median(), color='orange', linestyle=':', linewidth=2,
-                       label=f'Median={data.median():.1f}')
-            ax.set_title(f'התפלגות: {feat_sel}', fontweight='bold')
-            ax.legend()
-            st.pyplot(fig); plt.close()
+            st.pyplot(fig_eda_hist(df, feat_sel))
 
         with col2:
             st.markdown("**סטטיסטיקות תיאוריות**")
@@ -259,44 +399,13 @@ elif page == "📊 ניתוח נתונים (EDA)":
                 st.warning(f"⚠️ {miss} ערכים חסרים ({miss/len(df)*100:.1f}%)")
 
     with tab2:
-        fig, ax = plt.subplots(figsize=(10, 8))
-        corr = df.drop('student_id', axis=1).corr()
-        mask = np.triu(np.ones_like(corr, dtype=bool))
-        sns.heatmap(corr, annot=True, fmt='.2f', cmap='RdYlGn',
-                    mask=mask, vmin=-1, vmax=1, center=0,
-                    square=True, linewidths=0.5, ax=ax, annot_kws={'size': 9})
-        ax.set_title('מטריצת קורלציות', fontsize=14, fontweight='bold')
-        st.pyplot(fig); plt.close()
+        st.pyplot(fig_eda_corr_heatmap(df))
 
         st.markdown("**קורלציה עם SUCCESS:**")
-        corr_s = df.drop(['student_id','success'], axis=1).corrwith(df['success']).sort_values(ascending=False)
-        fig2, ax2 = plt.subplots(figsize=(8, 4))
-        colors = ['#2ecc71' if x > 0 else '#e74c3c' for x in corr_s]
-        ax2.barh(corr_s.index, corr_s.values, color=colors, edgecolor='white', alpha=0.9)
-        ax2.axvline(0, color='black', linewidth=0.8)
-        ax2.set_title('Correlation with Success', fontweight='bold')
-        st.pyplot(fig2); plt.close()
+        st.pyplot(fig_eda_corr_success(df))
 
     with tab3:
-        fig, axes = plt.subplots(2, 4, figsize=(16, 8))
-        palette = {0: '#e74c3c', 1: '#2ecc71'}
-        for i, feat in enumerate(FEAT):
-            ax = axes[i // 4][i % 4]
-            df_c = df[['success', feat]].dropna()
-            ax.boxplot([df_c[df_c['success']==0][feat],
-                        df_c[df_c['success']==1][feat]],
-                       labels=['כישלון', 'הצלחה'],
-                       patch_artist=True,
-                       boxprops=dict(alpha=0.7),
-                       medianprops=dict(color='black', linewidth=2))
-            boxes = ax.findobj(plt.matplotlib.patches.PathPatch)
-            if len(boxes) >= 2:
-                boxes[0].set_facecolor('#e74c3c')
-                boxes[1].set_facecolor('#2ecc71')
-            ax.set_title(feat.replace('_',' ').title(), fontsize=8, fontweight='bold')
-        plt.suptitle('Boxplots: כישלון (אדום) vs הצלחה (ירוק)', fontsize=12, fontweight='bold')
-        plt.tight_layout()
-        st.pyplot(fig); plt.close()
+        st.pyplot(fig_eda_boxplots(df))
 
 # ─── Page 3: Model Comparison ─────────────────────────────────────────────────
 elif page == "🤖 השוואת מודלים":
@@ -322,37 +431,19 @@ elif page == "🤖 השוואת מודלים":
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Confusion Matrix")
-        fig, ax = plt.subplots(figsize=(5, 4))
-        sns.heatmap(r['cm'], annot=True, fmt='d', cmap='Blues', ax=ax,
-                    xticklabels=['כישלון','הצלחה'], yticklabels=['כישלון','הצלחה'],
-                    cbar=False, annot_kws={'size': 16})
-        ax.set_xlabel('חיזוי'); ax.set_ylabel('אמיתי')
-        ax.set_title(selected_model, fontweight='bold')
-        st.pyplot(fig); plt.close()
+        st.pyplot(fig_model_cm(selected_model))
 
     with col2:
         st.subheader("ROC Curve")
         if r['y_proba'] is not None:
-            fig2, ax2 = plt.subplots(figsize=(5, 4))
-            fpr, tpr, _ = roc_curve(r['y_test'], r['y_proba'])
-            ax2.plot(fpr, tpr, color='#3498db', linewidth=2.5,
-                     label=f"AUC = {r['AUC']:.3f}")
-            ax2.plot([0,1],[0,1], 'k--', linewidth=1)
-            ax2.set_xlabel('False Positive Rate'); ax2.set_ylabel('True Positive Rate')
-            ax2.set_title('ROC Curve', fontweight='bold')
-            ax2.legend(); ax2.grid(alpha=0.3)
-            st.pyplot(fig2); plt.close()
+            st.pyplot(fig_model_roc(selected_model))
         else:
             st.info("ROC לא זמין למודל זה")
 
     # Feature importance
     if hasattr(r['model'], 'feature_importances_'):
         st.subheader("Feature Importance")
-        fi = pd.Series(r['model'].feature_importances_, index=FEAT).sort_values(ascending=True)
-        fig3, ax3 = plt.subplots(figsize=(8, 4))
-        fi.plot(kind='barh', color='#3498db', edgecolor='white', ax=ax3)
-        ax3.set_title(f'Feature Importance – {selected_model}', fontweight='bold')
-        st.pyplot(fig3); plt.close()
+        st.pyplot(fig_model_fi(selected_model))
 
 # ─── Page 4: Predict ──────────────────────────────────────────────────────────
 elif page == "🔍 חיזוי סטודנט":
@@ -360,21 +451,22 @@ elif page == "🔍 חיזוי סטודנט":
 
     st.info("הזן פרמטרים עבור סטודנט ובחר מודל לקבלת חיזוי")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        logins  = st.slider("מספר כניסות", 1, 150, 45)
-        sess_t  = st.slider("זמן ממוצע (דק')", 5.0, 120.0, 35.0)
-        assgn   = st.slider("מטלות שהוגשו", 0, 15, 11)
-        late    = st.slider("הגשות באיחור", 0, 10, 2)
+    with st.form("prediction_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            logins  = st.slider("מספר כניסות", 1, 150, 45)
+            sess_t  = st.slider("זמן ממוצע (דק')", 5.0, 120.0, 35.0)
+            assgn   = st.slider("מטלות שהוגשו", 0, 15, 11)
+            late    = st.slider("הגשות באיחור", 0, 10, 2)
 
-    with col2:
-        quiz    = st.slider("ממוצע בחנים", 0.0, 100.0, 70.0)
-        forum   = st.slider("הודעות בפורום", 0, 50, 8)
-        video   = st.slider("אחוז צפייה בסרטונים", 0.0, 1.0, 0.7, 0.05)
-        prev_g  = st.slider("ציון קודם", 40.0, 100.0, 72.0)
+        with col2:
+            quiz    = st.slider("ממוצע בחנים", 0.0, 100.0, 70.0)
+            forum   = st.slider("הודעות בפורום", 0, 50, 8)
+            video   = st.slider("אחוז צפייה בסרטונים", 0.0, 1.0, 0.7, 0.05)
+            prev_g  = st.slider("ציון קודם", 40.0, 100.0, 72.0)
 
-    model_choice = st.selectbox("בחר מודל:", list(results.keys()))
-    predict_btn  = st.button("🔮 חזה!")
+        model_choice = st.selectbox("בחר מודל:", list(results.keys()))
+        predict_btn  = st.form_submit_button("🔮 חזה!")
 
     if predict_btn:
         inp = np.array([[logins, sess_t, assgn, late, quiz, forum, video, prev_g]])
@@ -418,44 +510,16 @@ elif page == "🔍 חיזוי סטודנט":
 elif page == "🗂️ אשכולות (Clustering)":
     st.title("🗂️ ניתוח אשכולות – זיהוי דפוסי למידה")
 
-    @st.cache_resource
-    def run_clustering(df):
-        FEAT = ['number_of_logins','avg_session_time','assignments_submitted',
-                'late_submissions','quiz_avg','forum_posts',
-                'video_completion_rate','previous_grade']
-        X = df[FEAT].copy()
-        imp2 = SimpleImputer(strategy='median')
-        X_imp = imp2.fit_transform(X)
-        sc2 = StandardScaler()
-        X_sc = sc2.fit_transform(X_imp)
-        pca = PCA(n_components=2, random_state=42)
-        X_pca = pca.fit_transform(X_sc)
-        return X_sc, X_pca, pca, FEAT
-
     X_sc_cl, X_pca_cl, pca_cl, FEAT_cl = run_clustering(df)
 
     k = st.slider("מספר אשכולות (K)", 2, 8, 4)
-    km = KMeans(n_clusters=k, random_state=42, n_init=10)
-    labels = km.fit_predict(X_sc_cl)
+    km, labels, sil = cluster_fit(X_sc_cl, k)
 
     col1, col2 = st.columns([3, 2])
     with col1:
-        fig, ax = plt.subplots(figsize=(8, 6))
-        scatter = ax.scatter(X_pca_cl[:,0], X_pca_cl[:,1],
-                             c=labels, cmap='tab10', alpha=0.6, s=15)
-        centers_pca = pca_cl.transform(km.cluster_centers_)
-        ax.scatter(centers_pca[:,0], centers_pca[:,1],
-                   c='black', marker='X', s=200, zorder=5, label='Centroids')
-        ax.set_title(f'K-Means (K={k}) – מרחב PCA', fontweight='bold')
-        ax.set_xlabel(f'PC1 ({pca_cl.explained_variance_ratio_[0]:.1%})')
-        ax.set_ylabel(f'PC2 ({pca_cl.explained_variance_ratio_[1]:.1%})')
-        ax.legend()
-        plt.colorbar(scatter)
-        st.pyplot(fig); plt.close()
+        st.pyplot(fig_cluster_scatter(k))
 
     with col2:
-        from sklearn.metrics import silhouette_score
-        sil = silhouette_score(X_sc_cl, labels)
         st.metric("Silhouette Score", f"{sil:.4f}",
                   help="גבוה יותר = אשכולות מוגדרים יותר (מקסימום 1.0)")
 
@@ -511,16 +575,7 @@ elif page == "⚖️ ניתוח הוגנות":
         st.subheader("ביצועי המודל לפי קבוצת ציון קודם")
         st.dataframe(fair_df.set_index('קבוצה').round(4), use_container_width=True)
 
-        fig, ax = plt.subplots(figsize=(9, 5))
-        x = np.arange(len(fair_df))
-        w = 0.2
-        for i, m in enumerate(['Accuracy','Precision','Recall','F1']):
-            ax.bar(x + i*w, fair_df[m], w, label=m, alpha=0.85, edgecolor='white')
-        ax.set_xticks(x + 1.5*w); ax.set_xticklabels(fair_df['קבוצה'])
-        ax.set_ylim(0, 1.1); ax.set_ylabel('Score')
-        ax.set_title('ביצועי Random Forest לפי קבוצה', fontweight='bold')
-        ax.legend(); ax.grid(axis='y', alpha=0.3)
-        st.pyplot(fig); plt.close()
+        st.pyplot(fig_fairness(fair_df))
 
         st.markdown("---")
         st.subheader("📋 פרשנות והמלצות")
