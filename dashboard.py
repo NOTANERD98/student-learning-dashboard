@@ -159,8 +159,10 @@ results, Xte_sc, y_te, FEAT, sc, imp = train_models(df)
 @st.cache_resource(show_spinner=False)
 def fig_overview(_df):
     fig, axes = plt.subplots(1, 2, figsize=(9, 4))
-    _df['success'].value_counts().plot(kind='pie', ax=axes[0],
-        labels=['הצלחה', 'כישלון'], colors=['#2ecc71','#e74c3c'],
+    # Map labels by class value, not by frequency: 0 -> כישלון (red), 1 -> הצלחה (green).
+    # reindex([0, 1]) fixes the order so labels never swap when one class is the majority.
+    _df['success'].value_counts().reindex([0, 1], fill_value=0).plot(kind='pie', ax=axes[0],
+        labels=['כישלון', 'הצלחה'], colors=['#e74c3c', '#2ecc71'],
         autopct='%1.1f%%', startangle=90, textprops={'fontsize': 11})
     axes[0].set_title('התפלגות הצלחה/כישלון', fontweight='bold')
     axes[0].set_ylabel('')
