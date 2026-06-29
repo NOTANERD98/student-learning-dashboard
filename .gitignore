@@ -1,0 +1,29 @@
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.ipynb_checkpoints/
+
+# ─── Virtual environments ───
+.venv/
+venv/
+env/
+ENV/
+
+# ─── Streamlit secrets (NEVER commit) ───
+.streamlit/secrets.toml
+
+# ─── Environment / secrets ───
+.env
+*.env
+
+# ─── OS / editor cruft ───
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# ─── Logs ───
+*.log

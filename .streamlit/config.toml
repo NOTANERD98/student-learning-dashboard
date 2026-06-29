@@ -1,0 +1,17 @@
+# Streamlit configuration.
+# Theme matches the dashboard's blue accent; server options are safe cloud defaults.
+# NEVER put secrets here — use the platform's Secrets UI / .streamlit/secrets.toml.
+
+[theme]
+primaryColor = "#3498db"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f8f9fa"
+textColor = "#2c3e50"
+font = "sans serif"
+
+[server]
+headless = true
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false

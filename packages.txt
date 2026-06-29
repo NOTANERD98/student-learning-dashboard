@@ -1,0 +1,4 @@
+# System (apt) packages installed by Streamlit Community Cloud before pip runs.
+# Noto fonts provide Hebrew glyphs so matplotlib chart labels render correctly
+# instead of appearing as empty boxes on the Linux host.
+fonts-noto-core
